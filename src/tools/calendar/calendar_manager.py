@@ -100,7 +100,7 @@ class CalendarManager:
 
                 result = (
                     self.service.events()
-                    .insert(calendarId=self.config.CALENDAR_ID, body=event)
+                    .insert(calendarId=self.config.calendar_id, body=event)
                     .execute()
                 )
 
@@ -166,7 +166,7 @@ class CalendarManager:
         Raises:
             HttpError: If calendar API request fails
         """
-        days_ahead = days_ahead or self.config.DEFAULT_DAYS_AHEAD
+        days_ahead = days_ahead or self.config.default_days_ahead
         suggested_times: list[TimeSlot] = []
 
         now = datetime.now(timezone.utc)
@@ -176,7 +176,7 @@ class CalendarManager:
             events_result = (
                 self.service.events()
                 .list(
-                    calendarId=self.config.CALENDAR_ID,
+                    calendarId=self.config.calendar_id,
                     timeMin=now.isoformat() + "Z",
                     timeMax=week_from_now.isoformat() + "Z",
                     singleEvents=True,

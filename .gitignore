@@ -45,3 +45,10 @@ MANIFEST
 htmlcov/
 .tox/
 cover/
+
+# Secrets and credentials
+client_secrets.json
+token.json
+*.secret
+credentials.json
+client_secret_*.json

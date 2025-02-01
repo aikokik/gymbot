@@ -66,7 +66,7 @@ class CalendarAuth:
             logger.error(f"Error getting credentials for user {user_id}: {e}")
             return None
 
-    def start_auth_flow(self) -> tuple[InstalledAppFlow, str]:
+    def start_auth_flow(self, user_id: UserId) -> tuple[InstalledAppFlow, str]:
         """Start OAuth flow and return authorization URL"""
         try:
             flow = InstalledAppFlow.from_client_secrets_file(
@@ -76,6 +76,10 @@ class CalendarAuth:
             flow.run_local_server(
                 port=0
             )  # This will automatically handle the OAuth flow
+            creds = flow.credentials
+            self._save_credentials(user_id, creds)
+            logger.info(f"Successfully saved credentials for user {user_id}")
+
             return flow, None
         except Exception as e:
             logger.error(f"Failed to start auth flow: {e}")
