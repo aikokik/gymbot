@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+addopts = "-ra -s -vvv"
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore:.*utcfromtimestamp:DeprecationWarning:google.protobuf"
+]
+
+[tool.coverage.run]
+branch = true
+omit = []
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+exclude_lines = [
+    "pragma: no cover"
+]
+
+[tool.black]
+line-length = 88
+target-version = ['py312']
+include = '\.pyx?$'
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+fix = true
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "W",   # warnings
+    "C",   # complexity
+    "ANN"  # type annotations
+]
+ignore = [
+    "ANN101"  # Missing type annotation for self
+]
+
+[tool.ruff.isort]
+force-single-line = false
+combine-as-imports = true
+from-first = true
+lines-after-imports = 2
