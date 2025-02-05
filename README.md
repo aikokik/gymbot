@@ -1,6 +1,7 @@
 # GymBot 🏋️‍♂️
 
 A Simple Telegram bot that creates workout plans and integrates with Google Calendar for scheduling workouts.
+Demo video: https://youtu.be/y8uXQG80uKQ 
 
 ## Features
 
@@ -82,6 +83,4 @@ Logs are stored in the `logs` directory with the following structure:
 
 This bot is a simple implementation and may have limitations. Known potential issues include:
 - Slow request to LLM (can be improved with caching query)
-
-Demo video: https://youtu.be/y8uXQG80uKQ 
 
