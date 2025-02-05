@@ -45,9 +45,7 @@ cd gymbot
 ```
 
 2. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
+```make install```
 
 3. Set up environment variables:
 ```
