@@ -81,7 +81,4 @@ Logs are stored in the `logs` directory with the following structure:
 ## Error Handling
 
 This bot is a simple implementation and may have limitations. Known potential issues include:
-- Basic input validation
-- Calendar authentication errors
-- API communication issues
-- Scheduling conflicts
+- Slow request to LLM (can be improved with caching query)
