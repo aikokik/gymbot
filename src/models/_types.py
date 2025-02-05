@@ -43,6 +43,7 @@ class MuscleGroup(str, Enum):
     ARMS = "arms"
     CORE = "core"
     FULL_BODY = "full_body"
+    CARDIO = "cardio"
 
 
 class Exercise(BaseModel):

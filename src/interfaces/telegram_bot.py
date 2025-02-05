@@ -10,6 +10,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.helpers import escape_markdown
 
 from configs.config import Configs
 from configs.logging import setup_logging
@@ -33,6 +34,7 @@ class GymBot:
     def __init__(self) -> None:
         logger.info("Initializing GymBot")
         self.calendar_auth = CalendarAuth()
+        self._calendar_manager = None
 
     # Command handlers
     async def start_command(
@@ -53,10 +55,29 @@ class GymBot:
         """Clear chat history and send good bye message when the command /end is issued."""
         user = update.effective_user
         logger.info(f"End command received from user {user.id} ({user.first_name})")
-        self.reset_conversation_context(user.id)
+        self.__reset_conversation_context(user.id)
         # Clear user data
         context.user_data.clear()
+        # Delete calendar credentials if they exist
+        try:
+            self.calendar_auth.delete_credentials(user.id)
+            logger.info(f"Deleted calendar credentials for user {user.id}")
+        except Exception as e:
+            logger.error(
+                f"Error deleting calendar credentials for user {user.id}: {str(e)}"
+            )
         await update.message.reply_text(f"👋 Bye bye {user.first_name}")
+
+    def __reset_conversation_context(self, user_id: int) -> None:
+        """Reset all conversation context for the given user."""
+        logger.info(f"Resetting conversation context for user {user_id}")
+        try:
+            handler.reset_memory(user_id)
+        except Exception as e:
+            logger.error(
+                f"Error resetting context for user {user_id}: {str(e)}", exc_info=True
+            )
+            raise
 
     async def error_handler(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -65,6 +86,29 @@ class GymBot:
         logger.error(
             f'Update "{update}" caused error "{context.error}"', exc_info=context.error
         )
+
+    async def help_command(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Send a message when the command /help is issued."""
+        user = update.effective_user
+        logger.info(f"Help command received from user {user.id} ({user.first_name})")
+
+        help_text = (
+            "🤖 Available Commands:\n\n"
+            "/start - Start the bot and get a welcome message\n"
+            "/help - Show this help message\n"
+            "/start_plan - Begin creating your personalized workout plan\n"
+            "/create_plan - Create your workout plan\n"
+            "/end - End the current session and clear chat history\n\n"
+            "/connect_calendar - Connect your Google Calendar to schedule workouts\n\n"
+            "💡 Tips:\n"
+            "• Use /start_plan to create a new workout plan\n"
+            "• Follow the prompts and provide detailed information\n"
+            "• Use /end when you're done to clear the conversation"
+        )
+
+        await update.message.reply_text(help_text)
 
     async def start_workout_plan(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -99,7 +143,7 @@ class GymBot:
                     f"Ignoring message from user {user.id} - not in profile creation mode"
                 )
                 await update.message.reply_text(
-                    "Please use /start_plan to start creating your workout plan."
+                    "Please use /start_plan to start creating your workout plan first."
                 )
                 return
 
@@ -162,40 +206,6 @@ class GymBot:
                 "Sorry, something went wrong. Please try again later."
             )
 
-    async def help_command(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Send a message when the command /help is issued."""
-        user = update.effective_user
-        logger.info(f"Help command received from user {user.id} ({user.first_name})")
-
-        help_text = (
-            "🤖 Available Commands:\n\n"
-            "/start - Start the bot and get a welcome message\n"
-            "/help - Show this help message\n"
-            "/start_plan - Begin creating your personalized workout plan\n"
-            "/create_plan - Create your workout plan\n"
-            "/end - End the current session and clear chat history\n\n"
-            "/connect_calendar - Connect your Google Calendar to schedule workouts\n\n"
-            "💡 Tips:\n"
-            "• Use /start_plan to create a new workout plan\n"
-            "• Follow the prompts and provide detailed information\n"
-            "• Use /end when you're done to clear the conversation"
-        )
-
-        await update.message.reply_text(help_text)
-
-    def reset_conversation_context(self, user_id: int) -> None:
-        """Reset all conversation context for the given user."""
-        logger.info(f"Resetting conversation context for user {user_id}")
-        try:
-            handler.reset_memory(user_id)
-        except Exception as e:
-            logger.error(
-                f"Error resetting context for user {user_id}: {str(e)}", exc_info=True
-            )
-            raise
-
     async def create_workout_plan(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -203,7 +213,7 @@ class GymBot:
         user = update.effective_user
         logger.info(f"Creating workout plan for user {user.id} ({user.first_name})")
 
-        if "user_profile" not in context.user_data:
+        if not context.user_data.get("user_profile"):
             await update.message.reply_text(
                 "Please create your profile first using /start_plan"
             )
@@ -213,7 +223,7 @@ class GymBot:
             plan = await handler.create_workout_plan(
                 user.id, context.user_data["user_profile"]
             )
-            message_parts = self.format_workout_plan(plan)
+            message_parts = self.__format_workout_plan(plan)
 
             # Send introduction
             await update.message.reply_text(
@@ -265,7 +275,8 @@ class GymBot:
             await update.message.reply_text(
                 "Starting Google Calendar authentication..."
             )
-            self.calendar_auth.start_auth_flow(user_id)
+            auth_flow = self.calendar_auth.start_auth_flow(user_id)
+            context.user_data["auth_flow"] = auth_flow
 
             await update.message.reply_text(
                 "✅ Successfully connected to Google Calendar! 🎉\n"
@@ -275,51 +286,6 @@ class GymBot:
 
         except Exception as e:
             logger.error(f"Calendar authentication failed for user {user_id}: {str(e)}")
-            await update.message.reply_text(
-                "Sorry, couldn't complete authorization. Please try again or contact support."
-            )
-
-    async def handle_auth_callback(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle OAuth callback with authorization code"""
-        user = update.effective_user
-        user_id = user.id
-        logger.info(f"Received auth callback from user {user_id} ({user.first_name})")
-
-        try:
-            auth_code = update.message.text
-            logger.debug(f"Processing auth code for user {user_id}")
-
-            if not context.user_data.get("auth_flow"):
-                logger.warning(f"No auth flow found for user {user_id}")
-                await update.message.reply_text(
-                    "Please start the authentication process first with /connect_calendar"
-                )
-                return
-
-            flow = context.user_data["auth_flow"]
-            logger.debug(f"Retrieved auth flow for user {user_id}")
-
-            self.calendar_auth.finish_auth_flow(user_id, flow, auth_code)
-            logger.info(
-                f"Successfully authenticated user {user_id} with Google Calendar"
-            )
-
-            await update.message.reply_text(
-                "✅ Successfully connected to Google Calendar! 🎉\n"
-                "Now, let's schedule your workouts. When do you prefer to exercise?\n\n"
-                "Please provide your preferred workout time in 24-hour format (HH:MM), e.g., '14:30'"
-            )
-
-            # Start time preference collection
-            logger.debug(f"Started time preference collection for user {user_id}")
-
-        except Exception as e:
-            logger.error(
-                f"Calendar authentication failed for user {user_id}: {str(e)}",
-                exc_info=True,
-            )
             await update.message.reply_text(
                 "Sorry, couldn't complete authorization. Please try again or contact support."
             )
@@ -369,7 +335,9 @@ class GymBot:
                 return
 
             logger.debug(f"Retrieved calendar credentials for user {user_id}")
-            calendar = CalendarManager(creds, config=Configs().google_calendar)
+            self._calendar_manager = CalendarManager(
+                creds, config=Configs().google_calendar
+            )
 
             # Generate preferred times for next 7 days
             now = datetime.now()
@@ -391,8 +359,8 @@ class GymBot:
             logger.debug(f"Generated {len(preferred_times)} preferred time slots")
 
             # Get suggested times
-            suggested_times = await calendar.suggest_workout_times(
-                preferred_times, duration_minutes=60
+            suggested_times = await self._calendar_manager.suggest_workout_times(
+                user_id, preferred_times
             )
 
             if not suggested_times:
@@ -453,16 +421,12 @@ class GymBot:
 
             logger.debug(f"Selected {len(selected_times)} time slots")
 
-            # Get calendar manager
-            creds = self.calendar_auth.get_credentials(user_id)
-            if not creds:
-                logger.error(f"No calendar credentials found for user {user_id}")
+            if not self._calendar_manager:
+                logger.error(f"No calendar manager found for user {user_id}")
                 await update.message.reply_text(
-                    "Please connect your Google Calendar first using /connect"
+                    "Please connect your Google Calendar first using /connect_calendar"
                 )
                 return
-
-            calendar = CalendarManager(creds)
 
             # Create workout events
             workout_plan = context.user_data.get("workout_plan")
@@ -473,9 +437,20 @@ class GymBot:
                 )
                 return
 
+            if len(selected_times) != len(workout_plan.workouts):
+                logger.error(
+                    f"Number of selected times ({len(selected_times)}) does not match "
+                    f"number of workouts ({len(workout_plan.workouts)})"
+                )
+                await update.message.reply_text(
+                    "Sorry, the number of selected times does not match the number of workouts.\n"
+                    "Please try to select the correct times."
+                )
+                return
+
             logger.debug("Creating calendar events...")
-            event_ids = await calendar.create_workout_events(
-                selected_times, workout_plan
+            event_ids = await self._calendar_manager.create_workout_events(
+                user_id, selected_times, workout_plan
             )
 
             logger.info(f"Created {len(event_ids)} calendar events for user {user_id}")
@@ -516,89 +491,61 @@ class GymBot:
         )
         await update.message.reply_text(message)
 
-    def format_workout_plan(self, plan: WorkoutPlan) -> list[str]:
+    def __format_workout_plan(self, plan: WorkoutPlan) -> list[str]:
         """Format workout plan into a readable message. Returns a list of message chunks."""
-
-        def escape_markdown(text: str) -> str:
-            special_chars = [
-                "_",
-                "*",
-                "[",
-                "]",
-                "(",
-                ")",
-                "~",
-                "`",
-                ">",
-                "#",
-                "+",
-                "-",
-                "=",
-                "|",
-                "{",
-                "}",
-                ".",
-                "!",
-            ]
-            for char in special_chars:
-                text = text.replace(char, f"\\{char}")
-            return text
-
-        weeks = plan.duration_weeks
         messages = []
-        current_message = [f"🏋️‍♂️ *{escape_markdown(str(weeks))} Week Workout Plan*\n"]
+        current_message = ["🏋️‍♂️ *Week Workout Plan*\n"]
 
-        for week in range(weeks):
-            week_header = f"\n*Week {escape_markdown(str(week + 1))}*"
+        for day, workout in enumerate(plan.workouts, 1):
+            day_parts = [f"\n*Day {escape_markdown(str(day), version=2)}*"]
 
-            for day, workout in enumerate(plan.workouts, 1):
-                day_parts = [f"\n*Day {escape_markdown(str(day))}*"]
-
-                for exercise in workout:
-                    name = escape_markdown(str(exercise.exercise.name))
-                    instructions = escape_markdown(
+            for exercise in workout:
+                name = escape_markdown(str(exercise.exercise.name), version=2)
+                instructions = escape_markdown(
+                    (
                         str(exercise.exercise.instructions)
                         if isinstance(exercise.exercise.instructions, str)
                         else "; ".join(exercise.exercise.instructions)
-                    )
-                    notes = escape_markdown(str(exercise.notes))
-                    equipment = escape_markdown(str(exercise.exercise.equipment))
-                    difficulty = escape_markdown(str(exercise.exercise.difficulty))
-                    muscle_group = escape_markdown(str(exercise.exercise.muscle_group))
+                    ),
+                    version=2,
+                )
+                notes = escape_markdown(str(exercise.notes), version=2)
+                equipment = escape_markdown(str(exercise.exercise.equipment), version=2)
+                difficulty = escape_markdown(
+                    str(exercise.exercise.difficulty), version=2
+                )
+                muscle_group = escape_markdown(
+                    str(exercise.exercise.muscle_group), version=2
+                )
 
-                    exercise_parts = [
-                        f"\n• *{name}*",
-                        f"  \\- Instructions: {instructions}",
-                        f"  \\- Sets: {escape_markdown(str(exercise.sets))}",
-                        f"  \\- Reps: {escape_markdown(str(exercise.reps))}",
-                        f"  \\- Rest: {escape_markdown(str(exercise.rest_between_sets))}s",
-                        f"  \\- Video: {escape_markdown(str(exercise.exercise.video_url))}",
-                        f"  \\- Notes: {notes}",
-                        f"  \\- Equipment: {equipment}",
-                        f"  \\- Difficulty: {difficulty}",
-                        f"  \\- Muscle Group: {muscle_group}",
-                    ]
+                exercise_parts = [
+                    f"\n• *{name}*",
+                    f"  \\- Instructions: {instructions}",
+                    f"  \\- Sets: {escape_markdown(str(exercise.sets), version=2)}",
+                    f"  \\- Reps: {escape_markdown(str(exercise.reps), version=2)}",
+                    f"  \\- Rest: {escape_markdown(str(exercise.rest_between_sets), version=2)}s",
+                    f"  \\- Video: {escape_markdown(str(exercise.exercise.video_url), version=2)}",
+                    f"  \\- Notes: {notes}",
+                    f"  \\- Equipment: {equipment}",
+                    f"  \\- Difficulty: {difficulty}",
+                    f"  \\- Muscle Group: {muscle_group}",
+                ]
 
-                    # Check if adding this exercise would exceed message limit
-                    potential_message = "\n".join(
-                        current_message + day_parts + exercise_parts
-                    )
-                    if (
-                        len(potential_message) > 3800
-                    ):  # Safe limit for markdown messages
-                        messages.append("\n".join(current_message))
-                        current_message = [week_header] + day_parts + exercise_parts
-                    else:
-                        if week_header:
-                            current_message.append(week_header)
-                            week_header = ""  # Clear week header after using it
-                        current_message.extend(day_parts + exercise_parts)
-                    day_parts = []  # Clear day parts after using them
+                # Check if adding this exercise would exceed message limit
+                potential_message = "\n".join(
+                    current_message + day_parts + exercise_parts
+                )
+                if len(potential_message) > 3800:  # Safe limit for markdown messages
+                    messages.append("\n".join(current_message))
+                    current_message = day_parts + exercise_parts
+                else:
+                    current_message.extend(day_parts + exercise_parts)
+                day_parts = []  # Clear day parts after using them
 
         # Add any remaining content
         if current_message:
             if plan.notes:
-                notes = escape_markdown(str(plan.notes))
+                notes = escape_markdown(str(plan.notes), version=2)
                 notes_section = ["\n\n📝 *Notes:*", notes]
 
                 # Check if notes can fit in current message
@@ -637,7 +584,7 @@ def main() -> None:
         # Time preference handler (for initial time input)
         application.add_handler(
             MessageHandler(
-                filters.Regex(r"^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$") & ~filters.COMMAND,
+                filters.Regex(r"^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$"),
                 bot.handle_time_preference,
             )
         )
@@ -645,25 +592,22 @@ def main() -> None:
         # Time confirmation handler (for selecting suggested times)
         application.add_handler(
             MessageHandler(
-                filters.Regex(r"^[1-9][0-9,\s]*$") & ~filters.COMMAND,
+                filters.Regex(r"^[1-9][0-9,\s]*$"),
                 bot.handle_time_confirmation,
-            )
-        )
-
-        # Auth callback handler
-        application.add_handler(
-            MessageHandler(
-                filters.Regex(r"^[0-9a-zA-Z\-_]+$") & ~filters.COMMAND,
-                bot.handle_auth_callback,
             )
         )
 
         # Profile creation handler (should be last as it's the most general)
         application.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_profile_creation)
+            MessageHandler(
+                filters.TEXT
+                & ~filters.COMMAND
+                & ~filters.Regex(r"^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$")
+                & ~filters.Regex(r"^[1-9][0-9,\s]*$"),
+                bot.handle_profile_creation,
+            )
         )
 
-        # Add error handler
         application.add_error_handler(bot.error_handler)
 
         # Start the Bot

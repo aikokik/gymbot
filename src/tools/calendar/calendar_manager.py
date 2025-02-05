@@ -1,5 +1,7 @@
 # src/tools/calendar/calendar_manager.py
 from datetime import datetime, timedelta, timezone
+from threading import Lock
+from time import time
 from typing import TypedDict
 import logging
 
@@ -39,9 +41,42 @@ class CalendarManager:
         """
         self.service: Resource = build("calendar", "v3", credentials=credentials)
         self.config = config
+        self._user_locks: dict[int, tuple[Lock, float]] = {}
+        self._operation_lock = Lock()
+        self._cleanup_threshold = 3600
+
+    def _get_user_lock(self, user_id: int) -> Lock:
+        """Get or create a lock for a specific user."""
+        current_time = time()
+
+        with self._operation_lock:
+            # todo(aidana) there is needed scheduler that will clean locks
+            self._cleanup_old_locks(current_time)
+            if user_id not in self._user_locks:
+                self._user_locks[user_id] = (Lock(), current_time)
+            else:
+                # Update last used time
+                lock, _ = self._user_locks[user_id]
+                self._user_locks[user_id] = (lock, current_time)
+
+            return self._user_locks[user_id][0]
+
+    def _cleanup_old_locks(self, current_time: float) -> None:
+        """Remove locks that haven't been used for a while."""
+        to_remove = []
+        for user_id, (_, last_used) in self._user_locks.items():
+            if current_time - last_used > self._cleanup_threshold:
+                to_remove.append(user_id)
+
+        for user_id in to_remove:
+            del self._user_locks[user_id]
+            logger.debug(f"Cleaned up lock for user {user_id}")
 
     def _create_event_body(
-        self, start_time: datetime, end_time: datetime, workout_plan: WorkoutPlan
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        workout_exercises: list[WorkoutExercise],
     ) -> CalendarEvent:
         """
         Create calendar event body with workout details.
@@ -56,7 +91,7 @@ class CalendarManager:
         """
         return {
             "summary": "Workout Session 💪",
-            "description": self._format_workout_description(workout_plan.workouts),
+            "description": self._format_workout_description(workout_exercises),
             "start": {
                 "dateTime": start_time.isoformat(),
                 "timeZone": self.config.timezone,
@@ -75,12 +110,13 @@ class CalendarManager:
         }
 
     async def create_workout_events(
-        self, workout_times: list[TimeSlot], workout_plan: WorkoutPlan
+        self, user_id: int, workout_times: list[TimeSlot], workout_plan: WorkoutPlan
     ) -> list[str]:
         """
-        Create calendar events for workouts.
+        Create calendar events for workouts with concurrency control.
 
         Args:
+            user_id: Telegram user ID
             workout_times: list of workout time slots
             workout_plan: Workout plan details
 
@@ -90,57 +126,58 @@ class CalendarManager:
         Raises:
             HttpError: If calendar API request fails
         """
+        assert len(workout_times) == len(workout_plan.workouts)
         event_ids: list[str] = []
 
-        for workout in workout_times:
-            try:
-                event = self._create_event_body(
-                    workout["start"], workout["end"], workout_plan
-                )
+        user_lock = self._get_user_lock(user_id)
 
-                result = (
-                    self.service.events()
-                    .insert(calendarId=self.config.calendar_id, body=event)
-                    .execute()
-                )
+        try:
+            with user_lock:
+                for index, workout in enumerate(workout_times):
+                    event = self._create_event_body(
+                        workout["start"], workout["end"], workout_plan.workouts[index]
+                    )
 
-                event_ids.append(result["id"])
+                    result = (
+                        self.service.events()
+                        .insert(calendarId=self.config.calendar_id, body=event)
+                        .execute()
+                    )
 
-            except HttpError as e:
-                logger.error(f"Error creating calendar event: {e.reason}")
-                raise
-            except ValueError as e:
-                logger.error(f"Invalid data format in calendar event: {e}")
-                raise
-            except Exception as e:
-                logger.error(f"Unexpected error creating calendar event: {e}")
-                raise
+                    event_ids.append(result["id"])
+
+        except Exception as e:
+            # Rollback: delete any events that were created
+            with user_lock:
+                for event_id in event_ids:
+                    try:
+                        self.service.events().delete(
+                            calendarId=self.config.calendar_id, eventId=event_id
+                        ).execute()
+                    except Exception as delete_error:
+                        logger.error(f"Error during rollback: {delete_error}")
+
+            logger.error(f"Error creating calendar events: {e}")
+            raise
 
         return event_ids
 
-    def _format_workout_description(self, workouts: list[WorkoutExercise]) -> str:
-        """
-        Format workout details for calendar description.
-
-        Args:
-            workouts: list of workout exercises
-
-        Returns:
-            Formatted workout description
-        """
+    def _format_workout_description(
+        self, workout_exercises: list[WorkoutExercise]
+    ) -> str:
         description_parts = ["Today's Workout:\n"]
 
-        for workout in workouts:
+        for exercise in workout_exercises:
             description_parts.extend(
                 [
-                    f"• {workout.exercise.name}",
-                    f"  - {workout.sets} sets of {workout.reps} reps",
-                    f"  - Rest: {workout.rest_between_sets} seconds\n",
-                    f"  - Equipment: {workout.exercise.equipment}\n"
-                    f"  - Instructions: {' '.join(workout.exercise.instructions)}\n"
-                    f"  - Reference to image : {workout.exercise.image_url}\n"
-                    f"  - Reference to video : {workout.exercise.video_url}\n"
-                    f"  - Difficulty: {workout.exercise.difficulty}\n",
+                    f"• {exercise.exercise.name}",
+                    f"  - {exercise.sets} sets of {exercise.reps} reps",
+                    f"  - Rest: {exercise.rest_between_sets} seconds\n",
+                    f"  - Equipment: {exercise.exercise.equipment}\n"
+                    f"  - Instructions: {' '.join(exercise.exercise.instructions)}\n"
+                    f"  - Reference to image : {exercise.exercise.image_url}\n"
+                    f"  - Reference to video : {exercise.exercise.video_url}\n"
+                    f"  - Difficulty: {exercise.exercise.difficulty}\n",
                 ]
             )
 
@@ -148,66 +185,69 @@ class CalendarManager:
 
     async def suggest_workout_times(
         self,
+        user_id: int,
         preferred_times: list[TimeSlot],
-        duration_minutes: int,
         days_ahead: int | None = None,
     ) -> list[TimeSlot]:
         """
-        Suggest available workout times based on calendar.
+        Suggest workout times with concurrency control.
 
         Args:
-            preferred_times: list of preferred time slots
-            duration_minutes: Duration of workout
+            user_id: Telegram user ID
+            preferred_times: List of preferred time slots
             days_ahead: Number of days to look ahead
-
-        Returns:
-            list of available time slots
-
-        Raises:
-            HttpError: If calendar API request fails
         """
         days_ahead = days_ahead or self.config.default_days_ahead
         suggested_times: list[TimeSlot] = []
 
-        now = datetime.now(timezone.utc)
-        week_from_now = now + timedelta(days=days_ahead)
+        # Get user-specific lock
+        user_lock = self._get_user_lock(user_id)
 
         try:
-            events_result = (
-                self.service.events()
-                .list(
-                    calendarId=self.config.calendar_id,
-                    timeMin=now.isoformat() + "Z",
-                    timeMax=week_from_now.isoformat() + "Z",
-                    singleEvents=True,
-                    orderBy="startTime",
+            with user_lock:
+                now = datetime.now(timezone.utc)
+                week_later = now + timedelta(days=days_ahead)
+
+                time_min = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                time_max = week_later.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+                logger.info(f"Fetching events between {time_min} and {time_max}")
+
+                events_result = (
+                    self.service.events()
+                    .list(
+                        calendarId=self.config.calendar_id,
+                        timeMin=time_min,
+                        timeMax=time_max,
+                        singleEvents=True,
+                        orderBy="startTime",
+                    )
+                    .execute()
                 )
-                .execute()
-            )
 
-            busy_times = [
-                (
-                    datetime.fromisoformat(
-                        event["start"].get("dateTime", event["start"].get("date"))
-                    ),
-                    datetime.fromisoformat(
-                        event["end"].get("dateTime", event["end"].get("date"))
-                    ),
-                )
-                for event in events_result.get("items", [])
-            ]
+                busy_times = [
+                    (
+                        datetime.fromisoformat(
+                            event["start"].get("dateTime", event["start"].get("date"))
+                        ),
+                        datetime.fromisoformat(
+                            event["end"].get("dateTime", event["end"].get("date"))
+                        ),
+                    )
+                    for event in events_result.get("items", [])
+                ]
 
-            for pref in preferred_times:
-                start_time = pref["start"]
-                end_time = start_time + timedelta(minutes=duration_minutes)
+                for pref in preferred_times:
+                    start_time = pref["start"]
+                    end_time = pref["end"]
 
-                if self._is_time_slot_available(start_time, end_time, busy_times):
-                    suggested_times.append({"start": start_time, "end": end_time})
+                    if self._is_time_slot_available(start_time, end_time, busy_times):
+                        suggested_times.append({"start": start_time, "end": end_time})
 
             return suggested_times
 
         except HttpError as e:
-            logger.error(f"Error fetching calendar events: {e.reason}")
+            logger.error(f"An error occurred: {e}")
             raise
         except Exception as e:
             logger.error(f"Unexpected error suggesting workout times: {e}")
@@ -230,6 +270,12 @@ class CalendarManager:
         Returns:
             True if time slot is available
         """
+        # Ensure all datetimes are timezone-aware
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+
         return not any(
             start < busy_end and end > busy_start for busy_start, busy_end in busy_times
         )

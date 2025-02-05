@@ -192,10 +192,14 @@ class WorkoutPlannerHandler:
                     - Workout Days Per Week: {user_profile.workout_days_per_week}
                     - Medical Limitations: {', '.join(user_profile.medical_limitations or [])}
                     - Additional Info: {user_profile.additional_info}
-                    Use only the equipment that the user has available.
-                    For the muscle group, use only one of "chest/back/legs/shoulders/arms/core/full_body"
+                    Use only the equipment that the user has available or no equipment at all.
+                    For the muscle group, use only one of "chest/back/legs/shoulders/arms/core/full_body/cardio"
                     For the difficulty, use only one of "beginner/intermediate/advanced".
-                    Return ONLY raw JSON with no markdown formatting or code blocks. The response must be valid JSON that follows this exact schema:
+                    Suggest 1-2 cardio workouts per week.
+                    Use fun and interesting exercises.
+                    Return ONLY raw JSON with no markdown formatting or code blocks.
+                    Suggest {user_profile.workout_days_per_week} number of exercises per day.
+                    The response must be valid JSON that follows this exact schema:
                     {{
                         "weekly_schedule": [
                             {{
@@ -205,7 +209,7 @@ class WorkoutPlannerHandler:
                                     {{
                                         "name": "exercise-name",
                                         "description": "exercise-description",
-                                        "muscle_group": "chest/back/legs/shoulders/arms/core/full_body",
+                                        "muscle_group": "chest/back/legs/shoulders/arms/core/full_body/cardio",
                                         "difficulty": "beginner/intermediate/advanced",
                                         "equipment": "equipment-type",
                                         "instructions": ["step1", "step2"],
@@ -283,6 +287,7 @@ class WorkoutPlannerHandler:
     def _create_fallback_workout_plan(self, user_profile: UserProfile) -> WorkoutPlan:
         """Create a basic fallback workout plan when LLM fails."""
 
+        logger.warning("Creating fallback workout plan")
         # Day 1 Exercises
         day1_exercises = [
             WorkoutExercise(
@@ -420,5 +425,8 @@ class WorkoutPlannerHandler:
             user_profile=user_profile,
             workouts=[day1_exercises, day2_exercises, day3_exercises],
             duration_weeks=4,
-            notes="Start with lighter weights to focus on form. Increase weight gradually as you get comfortable with the movements.",
+            notes=(
+                "Start with lighter weights to focus on form. "
+                "Increase weight gradually as you get comfortable with the movements."
+            ),
         )
